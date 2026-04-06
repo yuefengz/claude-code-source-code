@@ -39,13 +39,27 @@ Stale memories verified against current code before acting on them
 
 **Two-step save.** Saving a memory requires two writes: the memory file and the MEMORY.md index. This ensures every memory is both discoverable (via index) and self-describing (via frontmatter). The index is a one-liner per memory — fast to scan but pointing to rich detail.
 
-**Type taxonomy.** Four memory types guide what to save and how to use it:
-- **user** — Who the user is (role, preferences, expertise) → tailor responses
-- **feedback** — What approach to take (do/don't, with why) → avoid repeating mistakes
-- **project** — What's happening (goals, deadlines, decisions) → understand context
-- **reference** — Where to find things (external systems) → know where to look
+**Type taxonomy.** Four memory types guide what to save and how to use it. Each type has distinct save triggers and usage patterns, preventing the memory from becoming a dumping ground:
 
-Each type has different save triggers and usage patterns, preventing the memory from becoming a dumping ground.
+- **user** — Who the user is (role, preferences, expertise) → tailor responses
+  - *Save triggers:* User reveals their role ("I'm a data scientist"), expertise level ("first time touching React"), responsibilities, or domain knowledge. These signals are often embedded casually in requests rather than stated explicitly.
+  - *Usage pattern:* Consulted when the model needs to calibrate its response — e.g., choosing the right level of detail in an explanation, framing frontend concepts in backend terms for a backend engineer, or deciding whether to explain a basic concept or skip ahead.
+  - *Scope:* Always private. Never shared in team memory since it describes the individual, not the project.
+
+- **feedback** — What approach to take (do/don't, with why) → avoid repeating mistakes
+  - *Save triggers:* Two distinct signal types — **corrections** (explicit: "don't do X", "stop doing Y", "no, not that way") and **confirmations** (implicit: "yes exactly", "perfect", or silently accepting a non-obvious choice). Corrections are easy to spot; confirmations require active attention. Both are saved with the *why* to enable judgment in edge cases.
+  - *Usage pattern:* Applied proactively during task execution. Before making an approach decision (testing strategy, PR structure, code style), check feedback memories for relevant guidance. The body structure (rule → Why → How to apply) supports contextual application rather than blind rule-following.
+  - *Scope:* Private by default. Only promoted to team when the guidance is a project-wide convention (e.g., "always use real databases in integration tests"), not a personal style preference (e.g., "don't summarize at the end of responses").
+
+- **project** — What's happening (goals, deadlines, decisions) → understand context
+  - *Save triggers:* User communicates who is doing what, why, or by when — merge freezes, initiative motivations, architectural decisions with external drivers (legal, compliance, performance targets). Relative dates are always converted to absolute dates at save time ("Thursday" → "2026-03-05") so the memory stays interpretable across conversations.
+  - *Usage pattern:* Provides the "why behind the what" for current requests. When a user asks to modify code, project memories reveal whether the change is driven by tech debt cleanup vs. compliance requirements, which affects scope decisions. These memories decay fastest — always verify they're still current before acting on them.
+  - *Scope:* Strongly biased toward team, since project state affects all contributors.
+
+- **reference** — Where to find things (external systems) → know where to look
+  - *Save triggers:* User mentions external resources and their purpose — issue trackers ("bugs are in Linear project INGEST"), dashboards ("the oncall Grafana board is at X"), Slack channels, documentation wikis, CI/CD URLs, or any out-of-repo system that's relevant to the project.
+  - *Usage pattern:* Consulted when the user references an external system or when the model suspects relevant information lives outside the codebase. These memories act as a directory of external resources — they store *where* to look, not the information itself.
+  - *Scope:* Usually team, since external system locations are shared knowledge.
 
 **Hard truncation.** MEMORY.md is capped at 200 lines / 25KB. This prevents memory from consuming the context budget. A warning is appended if truncated, signaling the user to prune.
 
