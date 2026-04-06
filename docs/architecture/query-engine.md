@@ -56,22 +56,49 @@ The API layer is cheaper and preserves more context; the client layer is a fallb
 
 **Multi-backend abstraction.** `getAnthropicClient()` routes to the correct SDK class based on environment variables. All backends share the same streaming interface, so the query loop doesn't know which provider it's talking to.
 
+**Seven continue sites.** The `while(true)` loop has 7 distinct points where it decides to iterate rather than terminate:
+1. **collapse_drain_retry** — context collapse recovery after 413/media errors
+2. **reactive_compact_retry** — reactive compaction for prompt-too-long recovery
+3. **max_output_tokens_escalate** — single clean escalation from 8K→64K before multi-turn recovery
+4. **max_output_tokens_recovery** — multi-turn recovery loop (max 3 attempts)
+5. **stop_hook_blocking** — stop hook injected blocking errors trigger retry
+6. **token_budget_continuation** — auto-continue when <90% of budget consumed
+7. **next_turn** — tool execution loop at turn end
+
+A critical detail: `hasAttemptedReactiveCompact` is preserved across `stop_hook_blocking` to prevent infinite loops (CC-1180), but reset on `next_turn`.
+
+**Output limit escalation.** Default max output is 32K but capped to 8K (`CAPPED_DEFAULT_MAX_TOKENS`) for slot-reservation optimization — BQ p99 analysis shows <1% of requests hit this limit. Those get one clean retry escalating to 64K (gated by `tengu_otk_slot_v1`), then fall back to a multi-turn recovery loop. This avoids expensive recompaction when a single retry suffices.
+
+**Withheld errors for SDK callers.** `max_output_tokens` errors are withheld from streaming (`isWithheldMaxOutputTokens`) until recovery is exhausted. This prevents SDK callers (cowork, desktop) from terminating mid-recovery when the engine may still succeed.
+
+**Fast mode cooldown mechanics.** The beta header is latched session-stable (cache-safe), but the `speed='fast'` parameter stays dynamic — cooldown suppresses actual fast mode without changing the cache key. Cooldown triggers on `rate_limit` or `overloaded` errors, with a `resetAt` timestamp. If the org disables fast mode entirely, the user's setting is permanently cleared (distinct from temporary cooldown).
+
+**API microcompact: thinking preservation.** When thinking is enabled and not redacted, all thinking blocks are preserved *unless* `clearAllThinking` fires (>1h idle, cache miss) — then only the last turn's thinking is kept (minimum 1, the required minimum). This balances context savings with model continuity.
+
+**Tool clearing selectivity.** API-native tool clearing distinguishes read ops from write ops: shell, glob, grep, file-read, web-fetch, and web-search results are clearable, but file-edit, file-write, and notebook-edit are preserved. Write operations contain state that the model may need to reference.
+
+**Task budget carryover across compaction.** Consumed tokens before compaction are subtracted from the remaining budget, preventing over-usage when a compacted conversation resumes with a "fresh" token count.
+
 ## Insights
 
 - The retry strategy distinguishes between transient errors (429/529 → backoff) and auth errors (401 → refresh credentials and get a fresh client). Fast mode adds a wrinkle: short `retry-after` headers keep fast mode active, but long delays trigger a permanent cooldown.
 - Prompt caching uses `cache_control: { type: 'ephemeral', ttl: '1h' }` markers. Beta headers like `afkHeaderLatched` use sticky-on latches — once activated in a session, they stay on for stability.
 - The stream idle watchdog aborts connections that stall for 90+ seconds with no chunks, preventing hung connections from blocking the conversation.
 - `paramsFromContext()` is a closure that rebuilds API params on each retry attempt, allowing dynamic adjustments (like model fallback or thinking config changes) between retries.
+- The `clear_at_least` parameter in API microcompact computes the minimum tokens to drop to guarantee hitting the target, rather than relying on the server to guess an appropriate amount.
+- Diminishing returns detection (≥3 continuations + last 2 deltas <500 tokens) prevents infinite loops where the model produces negligible output per continuation.
 
 ## Key Files
 
 | File | Role |
 |------|------|
-| `src/query.ts` | Main `queryLoop()` state machine (~1300 lines) |
+| `src/query.ts` | Main `queryLoop()` state machine (~1300 lines), 7 continue sites |
 | `src/QueryEngine.ts` | SDK-facing wrapper, message management |
 | `src/services/api/claude.ts` | API streaming client, request construction (~3000 lines) |
 | `src/services/api/client.ts` | Multi-backend client factory (Direct, Bedrock, Vertex, Azure) |
 | `src/services/api/withRetry.ts` | Retry strategy, error categorization |
 | `src/services/compact/compact.ts` | Client-side compaction via LLM summarization |
-| `src/services/compact/apiMicrocompact.ts` | API-native context editing configuration |
+| `src/services/compact/apiMicrocompact.ts` | API-native context editing, thinking preservation, tool clearing |
 | `src/query/tokenBudget.ts` | Auto-continue budget tracking & diminishing returns |
+| `src/utils/context.ts` | Output token defaults, capping, escalation thresholds |
+| `src/utils/fastMode.ts` | Fast mode state, cooldown mechanics, org status |

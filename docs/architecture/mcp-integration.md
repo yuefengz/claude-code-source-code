@@ -51,22 +51,37 @@ Built-in tools (sorted by name)
 
 **Policy enforcement at connection time.** Deny rules are checked before connections are established, not after. An enterprise denylist can prevent connections to specific servers by name, command, or URL pattern. Denylist takes precedence over allowlist.
 
+**Error resilience via SDK transport gap bridging.** The MCP SDK's transport layer calls `onerror` on connection failures but does *not* call `onclose`, which Claude Code depends on for triggering reconnection. The implementation bridges this by tracking 3 consecutive terminal errors (`MAX_ERRORS_BEFORE_RECONNECT`) and manually triggering `close()` to reject pending tool calls and clear the memoization cache. A `hasTriggeredClose` guard prevents re-entry — `close()` aborts in-flight streams which may fire `onerror` again.
+
+**Stdio process termination escalation.** For stdio servers, `StdioClientTransport.close()` only sends an abort signal. Many MCP servers (especially Docker containers) require explicit signal escalation: SIGINT (100ms wait) → SIGTERM (400ms wait) → SIGKILL, with process existence checks via `process.kill(pid, 0)`. A 600ms failsafe timeout keeps the CLI responsive, trading thorough graceful shutdown for user experience.
+
+**HTTP session expiry detection.** The implementation detects HTTP 404 + JSON-RPC error code -32001 (MCP session not found) and calls `closeTransportAndRejectPending('session expired')`, which clears the connection memoization cache and forces a fresh session ID on reconnect. This is critical for remote HTTP/SSE transports where sessions are ephemeral.
+
+**Four-cache invalidation on disconnect.** When `onclose` fires, four separate caches are invalidated: `connectToServer`, `fetchToolsForClient`, `fetchResourcesForClient`, `fetchCommandsForClient`. This prevents "reconnect fetch stale data" bugs — resources/tools cached before connection drop would persist otherwise.
+
+**Resource tool deduplication.** Resource tools (`ListMcpResourcesTool`, `ReadMcpResourceTool`) are added only once per MCP client set, not per server. The implementation checks if any connected server already provides these tools before adding them, preventing duplicate "list resources" entries when multiple servers expose resources.
+
+**Large output file persistence.** When `ENABLE_MCP_LARGE_OUTPUT_FILES` is set, large MCP outputs are persisted to disk with instructions for reading rather than truncated in-memory. Falls back to truncation if output contains images (persisting images as JSON defeats compression logic).
+
+**Configurable connection timeout.** Connection timeout defaults to 30 seconds but is configurable via the `MCP_TIMEOUT` environment variable, used in `Promise.race()` timeout logic.
+
 ## Insights
 
 - The tool execution wrapper handles three content types: text (passed through), binary (persisted to disk with MIME type), and structured (MCP `_meta` preserved). Large results are truncated with file references, same as built-in tools.
 - Agent-specific MCP servers can be declared in agent frontmatter. The agent system initializes these at spawn time and cleans them up when the agent completes.
 - IDE extensions (VS Code, JetBrains) can expose MCP servers via `sse-ide` or `ws-ide` transports. The IDE lockfile provides the port and auth token.
 - `claudeai-proxy` transport rewrites URLs for Claude.ai's session-ingress, enabling cloud-hosted MCP connections.
-- Description truncation at 2048 chars prevents a single MCP tool from consuming excessive context.
+- Description truncation at 2048 chars prevents a single MCP tool from consuming excessive context. Server instructions are similarly truncated, with original/truncated byte counts logged for diagnostics.
+- Qualified naming (`mcp__serverName__toolName`) accommodates server names containing `__` by joining all parts after the server name prefix, though this creates edge-case ambiguity.
 
 ## Key Files
 
 | File | Role |
 |------|------|
-| `src/services/mcp/client.ts` | Connection management, tool wrapping (~3300 lines) |
+| `src/services/mcp/client.ts` | Connection management, tool wrapping, error resilience (~3300 lines) |
 | `src/services/mcp/config.ts` | Config loading, policy enforcement, deduplication |
 | `src/services/mcp/types.ts` | Transport types, connection states |
-| `src/services/mcp/auth.ts` | OAuth flow, XAA cross-app access, token refresh |
+| `src/services/mcp/auth.ts` | OAuth flow, XAA cross-app access, token refresh, session expiry |
 | `src/services/mcp/mcpStringUtils.ts` | Qualified naming: `mcp__server__tool` |
 | `src/services/mcp/normalization.ts` | Character normalization for API compatibility |
 | `src/tools/MCPTool/MCPTool.ts` | Base MCP tool wrapper with UI rendering |
